@@ -1,84 +1,97 @@
 import streamlit as st
-import pandas as pd
 import yfinance as yf
+import pandas as pd
 import plotly.graph_objects as go
-from scipy.signal import argrelextrema
 import numpy as np
 
-# --- 1. SMART ANALYSIS TOOLS ---
+# --- 1. CONFIG & SESSION STATE ---
+st.set_page_config(page_title="NexusFlow AI Pro", layout="wide")
+st.title("🏛️ Institutional AI Terminal")
 
-def calculate_pressure(df):
-    """Calculates Buy vs Sell Pressure Percentage"""
-    # CLV (Close Location Value) determines if bulls or bears won the candle
-    # If close is near high, bulls are strong. If near low, bears are strong.
-    clv = ((df['Close'] - df['Low']) - (df['High'] - df['Close'])) / (df['High'] - df['Low'])
-    clv = clv.fillna(0)
+# Initialize persistent favorites
+if 'favorites' not in st.session_state:
+    st.session_state.favorites = ["GC=F", "EURUSD=X", "BTC-USD"]
+
+# --- 2. SIDEBAR MANAGER ---
+with st.sidebar:
+    st.header("⭐ Watchlist Manager")
+    # Search and Add
+    new_asset = st.text_input("Search Instrument (Ticker):").upper()
+    if st.button("➕ Add to Favorites"):
+        if new_asset and new_asset not in st.session_state.favorites:
+            st.session_state.favorites.append(new_asset)
+            st.rerun()
     
-    # Calculate Buying and Selling Volume
-    buy_vol = df['Volume'] * (clv.clip(lower=0))
-    sell_vol = df['Volume'] * (clv.clip(upper=0).abs())
+    st.divider()
+    # Timeframe Global Control
+    timeframe = st.selectbox("Global Timeframe:", ["1m", "5m", "1h", "1d"], index=2)
     
-    total_buy = buy_vol.tail(20).sum()
-    total_sell = sell_vol.tail(20).sum()
-    total = total_buy + total_sell
+    # Favorites list with delete buttons
+    st.write("### Monitoring:")
+    for fav in st.session_state.favorites:
+        col_a, col_b = st.columns([4, 1])
+        col_a.write(f"🔍 {fav}")
+        if col_b.button("🗑️", key=f"del_{fav}"):
+            st.session_state.favorites.remove(fav)
+            st.rerun()
+
+# --- 3. THE ANALYSIS ENGINE ---
+def get_pro_analysis(symbol, tf):
+    # Map timeframe to Yahoo periods
+    p_map = {"1m": "1d", "5m": "5d", "1h": "1mo", "1d": "1y"}
+    df = yf.download(symbol, period=p_map[tf], interval=tf, progress=False)
+    if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
     
-    buy_pct = (total_buy / total * 100) if total > 0 else 50
-    sell_pct = (total_sell / total * 100) if total > 0 else 50
-    return round(buy_pct, 1), round(sell_pct, 1)
-
-def get_levels(df):
-    """Detects major Support and Resistance using local Min/Max"""
-    # We look for price points where the trend reversed
-    n = 5 # neighborhood to look for peaks
-    df['min'] = df.iloc[argrelextrema(df.Close.values, np.less_equal, order=n)[0]]['Close']
-    df['max'] = df.iloc[argrelextrema(df.Close.values, np.greater_equal, order=n)[0]]['Close']
+    # Calculate Buy/Sell Pressure (Money Flow Index logic)
+    # logic: (Close - Low) vs (High - Close)
+    bull_power = (df['Close'] - df['Low']).tail(10).sum()
+    bear_power = (df['High'] - df['Close']).tail(10).sum()
+    total = bull_power + bear_power
+    buy_pct = (bull_power / total * 100) if total > 0 else 50
     
-    supports = df['min'].dropna().unique().tolist()
-    resistances = df['max'].dropna().unique().tolist()
-    return supports[-3:], resistances[-3:] # Return the last 3 major zones
-
-# --- 2. DASHBOARD UI ---
-st.set_page_config(layout="wide")
-st.title("🏛️ NexusFlow: Smart Pressure Terminal")
-
-ticker = st.sidebar.text_input("Symbol:", "GC=F")
-data = yf.download(ticker, period="6d", interval="1h", progress=False)
-if isinstance(data.columns, pd.MultiIndex): data.columns = data.columns.get_level_values(0)
-
-# --- 3. THE "REAL-TIME" PRESSURE GAUGE ---
-buy_p, sell_p = calculate_pressure(data)
-
-col1, col2, col3 = st.columns([1, 2, 1])
-
-with col1:
-    st.write("### Buy vs Sell Power")
-    st.metric("Bulls (Buy %)", f"{buy_p}%", delta_color="normal")
-    st.metric("Bears (Sell %)", f"-{sell_p}%", delta_color="inverse")
+    # Calculate Trend (Moving Average)
+    df['SMA20'] = df['Close'].rolling(20).mean()
+    last_price = df['Close'].iloc[-1]
+    last_sma = df['SMA20'].iloc[-1]
+    trend = "UP" if last_price > last_sma else "DOWN"
     
-    # Progress Bar UI
-    st.write("Market Balance")
-    st.progress(buy_p / 100)
-
-with col2:
-    # MAIN CHART WITH S/R LEVELS
-    supports, resistances = get_levels(data)
+    # Signal Logic
+    if buy_pct > 65 and trend == "UP": decision = "🟢 STRONG BUY"
+    elif buy_pct < 35 and trend == "DOWN": decision = "🔴 STRONG SELL"
+    else: decision = "🟡 NO ACTION"
     
-    fig = go.Figure(data=[go.Candlestick(x=data.index,
-                    open=data['Open'], high=data['High'],
-                    low=data['Low'], close=data['Close'], name="Price")])
-    
-    # Add Support Lines (Green)
-    for s in supports:
-        fig.add_hline(y=s, line_dash="dash", line_color="green", annotation_text="SUPPORT")
-        
-    # Add Resistance Lines (Red)
-    for r in resistances:
-        fig.add_hline(y=r, line_dash="dash", line_color="red", annotation_text="RESISTANCE")
+    return df, round(buy_pct, 1), 100 - round(buy_pct, 1), trend, decision
 
-    fig.update_layout(template="plotly_dark", height=600, xaxis_rangeslider_visible=False)
-    st.plotly_chart(fig, use_container_width=True)
-
-with col3:
-    st.write("### Key Zones")
-    st.error(f"Resistance: {max(resistances):.2f}" if resistances else "No Resistance Found")
-    st.success(f"Support: {min(supports):.2f}" if supports else "No Support Found")
+# --- 4. MULTI-INSTRUMENT DISPLAY ---
+if st.session_state.favorites:
+    # Show instruments in a grid
+    for asset in st.session_state.favorites:
+        try:
+            df, b_pct, s_pct, trend, dec = get_pro_analysis(asset, timeframe)
+            
+            # Creating a Container for each instrument
+            with st.container(border=True):
+                c1, c2, c3 = st.columns([1, 2, 1])
+                
+                with c1:
+                    st.subheader(asset)
+                    st.metric("Trend", trend, delta="Bullish" if trend=="UP" else "Bearish")
+                    st.write(f"**Decision:** {dec}")
+                
+                with c2:
+                    # Candlestick Chart
+                    fig = go.Figure(data=[go.Candlestick(x=df.index, open=df['Open'], 
+                                    high=df['High'], low=df['Low'], close=df['Close'])])
+                    fig.update_layout(height=300, margin=dict(l=0,r=0,t=0,b=0), template="plotly_dark", xaxis_rangeslider_visible=False)
+                    st.plotly_chart(fig, use_container_width=True)
+                
+                with c3:
+                    st.write("### Pressure Gauge")
+                    st.write(f"Buyers: {b_pct}%")
+                    st.progress(int(b_pct))
+                    st.write(f"Sellers: {s_pct}%")
+                    st.progress(int(s_pct))
+        except:
+            st.error(f"Could not load data for {asset}")
+else:
+    st.info("Add an instrument in the sidebar to start analysis.")
