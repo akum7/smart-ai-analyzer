@@ -10,7 +10,7 @@ st.title("🏛️ NexusFlow: Smart AI Market Intelligence")
 
 # --- 2. GET YOUR FREE API KEY ---
 # Go to finnhub.io to get a free key and replace this placeholder
-FINNHUB_KEY = st.sidebar.text_input("Enter Finnhub API Key", type="password")
+FINNHUB_KEY = st.sidebar.text_input("Enter Finnhub API Key", type="d608as9r01qihi8orojgd608as9r01qihi8orok0")
 
 # Sidebar Configuration
 asset_map = {
