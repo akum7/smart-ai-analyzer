@@ -1,77 +1,75 @@
 import streamlit as st
 import pandas as pd
 import yfinance as yf
-import plotly.express as px
+import plotly.graph_objects as go
 from transformers import pipeline
 
-# --- 1. SETUP ---
-st.set_page_config(page_title="NexusFlow AI Pro", layout="wide")
-st.title("🏛️ NexusFlow: Smart AI Terminal")
+# --- 1. PRO UI SETUP ---
+st.set_page_config(page_title="NexusFlow Pro Terminal", layout="wide")
+st.title("🏛️ NexusFlow: AI Institutional Terminal")
 
-# --- 2. FAVORITES & HEATMAP DATA ---
-# You can add or remove your favorite symbols here
-FAVORITES = ["GC=F", "SI=F", "EURUSD=X", "GBPUSD=X", "BTC-USD", "^GSPC", "^IXIC"]
+# --- 2. PERSISTENT WATCHLIST ---
+if 'watchlist' not in st.session_state:
+    st.session_state.watchlist = ["GC=F", "EURUSD=X", "BTC-USD"]
 
-@st.cache_data(ttl=3600)
-def get_heatmap_data(tickers):
-    results = []
-    for t in tickers:
-        try:
-            df = yf.download(t, period="5d", interval="1d", progress=False)
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(0)
-            
-            # Calculate % change from yesterday to today
-            change = ((df['Close'].iloc[-1] - df['Close'].iloc[-2]) / df['Close'].iloc[-2]) * 100
-            results.append({"Symbol": t, "Change %": round(change, 2), "Price": round(df['Close'].iloc[-1], 4)})
-        except:
-            continue
-    return pd.DataFrame(results)
+# --- 3. SIDEBAR: MONITORING & INPUT ---
+with st.sidebar:
+    st.header("🎛️ Terminal Controls")
+    new_symbol = st.text_input("Add Symbol (e.g., AAPL, GBPUSD=X):").upper()
+    if st.button("➕ Add to Monitor"):
+        if new_symbol and new_symbol not in st.session_state.watchlist:
+            st.session_state.watchlist.append(new_symbol)
+    
+    st.write("---")
+    selected_asset = st.selectbox("Active Monitoring:", st.session_state.watchlist)
+    
+    # TIMEFRAME SWITCHER
+    tf_choice = st.radio("Timeframe Analysis:", ["1m", "5m", "1h", "1d"], index=3)
+    
+    # Clear Watchlist
+    if st.button("🗑️ Reset Watchlist"):
+        st.session_state.watchlist = ["GC=F", "EURUSD=X", "BTC-USD"]
+        st.rerun()
 
-# --- 3. THE SMART DECISION ENGINE ---
-def get_clean_data(ticker):
-    df = yf.download(ticker, period="60d", interval="1d", progress=False)
+# --- 4. DATA ENGINE ---
+def get_data(ticker, interval):
+    # Mapping intervals to periods
+    period_map = {"1m": "1d", "5m": "5d", "1h": "1mo", "1d": "max"}
+    df = yf.download(ticker, period=period_map[interval], interval=interval, progress=False)
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
-    df.reset_index(inplace=True)
     return df
 
-# --- 4. DASHBOARD LAYOUT ---
-tab1, tab2 = st.tabs(["🎯 Daily Decision", "🗺️ Market Heatmap"])
+data = get_data(selected_asset, tf_choice)
 
-with tab1:
-    st.subheader("Daily Strategy & Favorites")
-    selected_fav = st.selectbox("Switch to Favorite Instrument:", FAVORITES)
-    
-    # Run the same analysis as before but for the selected favorite
-    data = get_clean_data(selected_fav)
-    st.line_chart(data.set_index('Date')['Close'])
-    
-    # Decision Logic Box
-    st.info(f"**AI Recommendation for {selected_fav}:** Analysis complete. Check Order Blocks below.")
-    # (The rest of your Order Block and Sentiment code goes here)
+# --- 5. SIGNAL LOGIC & DASHBOARD ---
+col1, col2 = st.columns([3, 1])
 
-with tab2:
-    st.subheader("Global Market Heatmap (24h Change)")
-    h_data = get_heatmap_data(FAVORITES)
+with col1:
+    # PROFESSIONAL CANDLESTICK CHART
+    fig = go.Figure(data=[go.Candlestick(x=data.index,
+                    open=data['Open'], high=data['High'],
+                    low=data['Low'], close=data['Close'], name="Price")])
+    fig.update_layout(template="plotly_dark", xaxis_rangeslider_visible=False, height=500)
+    st.plotly_chart(fig, use_container_width=True)
+
+with col2:
+    # CHANGE % & PRICE
+    curr_price = data['Close'].iloc[-1]
+    prev_price = data['Close'].iloc[-2]
+    chg_pct = ((curr_price - prev_price) / prev_price) * 100
     
-    if not h_data.empty:
-        # Create a professional heatmap using Plotly
-        fig = px.treemap(h_data, 
-                         path=['Symbol'], 
-                         values=[1]*len(h_data), # Equal box sizes
-                         color='Change %', 
-                         color_continuous_scale='RdYlGn', # Red to Green
-                         hover_data=['Price'],
-                         title="Relative Strength of Favorites")
-        st.plotly_chart(fig, use_container_width=True)
+    st.metric(label="Live Price", value=f"{curr_price:.4f}", delta=f"{chg_pct:.2f}%")
+    
+    # SMART SIGNALS (Buy/Sell/Wait)
+    st.subheader("💡 AI Signal")
+    # Simple logic: If price > 20-period MA and Vol is high -> Buy
+    ma20 = data['Close'].rolling(20).mean().iloc[-1]
+    if curr_price > ma20:
+        st.success("🎯 SIGNAL: BUY")
+        st.caption("Institutional accumulation detected above MA20.")
+    elif curr_price < ma20:
+        st.error("🎯 SIGNAL: SELL")
+        st.caption("Distribution active below key resistance.")
     else:
-        st.error("Could not load heatmap data. Check your internet connection.")
-
-# --- SIDEBAR INFO ---
-with st.sidebar:
-    st.write("### My Favorites List")
-    for f in FAVORITES:
-        st.write(f"• {f}")
-    st.divider()
-    st.caption("AI Terminal v2.0 - Running on GitHub")
+        st.warning("🎯 SIGNAL: WAIT")
