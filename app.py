@@ -6,107 +6,153 @@ import numpy as np
 from scipy import stats
 from streamlit_autorefresh import st_autorefresh
 
-# --- 1. INITIALIZATION & LIVE SYNC ---
+# --- 1. INITIALIZATION ---
 if 'favorites' not in st.session_state:
     st.session_state['favorites'] = ["GC=F", "BTC-USD", "EURUSD=X"]
 
-# Auto-refresh every 30 seconds to keep the "Live" feel
+# 30-second live refresh heartbeat
 st_autorefresh(interval=30 * 1000, key="datarefresh")
 
 # --- 2. THE PRESSURE & PROJECTION ENGINE ---
 def get_market_analysis(symbol, tf):
-    p_map = {"1m": "1d", "5m": "1d", "15m": "5d", "1h": "1mo"}
-    df = yf.download(symbol, period=p_map[tf], interval=tf, progress=False)
-    if df.empty: return None
-    if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
+    """Fetches data with STRICT period limits to prevent 'Month Data' bug"""
+    # Yahoo Limit Handler
+    if tf == "1m":
+        req_period = "7d"   # Max for 1m
+    elif tf in ["5m", "15m"]:
+        req_period = "60d"  # Max for intraday < 1h
+    elif tf == "1h":
+        req_period = "2y"   # 1h data is usually available for 2 years
+    else:
+        req_period = "max"
 
-    # 🟢 BUY VS 🔴 SELL PRESSURE LOGIC
-    # We calculate the distance of the Close from the Low (Bulls) and High (Bears)
-    bull_vol = (df['Close'] - df['Low']).tail(14).sum()
-    bear_vol = (df['High'] - df['Close']).tail(14).sum()
-    total = bull_vol + bear_vol
-    buy_pct = round((bull_vol / total * 100), 1) if total > 0 else 50
-    sell_pct = 100 - buy_pct
+    try:
+        # Download data
+        df = yf.download(symbol, period=req_period, interval=tf, progress=False)
+        
+        if df.empty or len(df) < 10: 
+            return None
+            
+        # Fix MultiIndex columns if present
+        if isinstance(df.columns, pd.MultiIndex): 
+            df.columns = df.columns.get_level_values(0)
 
-    # PROJECTION LOGIC (Linear Regression)
-    y = df['Close'].values
-    x = np.arange(len(y))
-    slope, intercept, _, _, _ = stats.linregress(x, y)
-    future_x = np.arange(len(y), len(y) + 5)
-    future_y = slope * future_x + intercept
-    future_dates = pd.date_range(df.index[-1], periods=6, freq=df.index.inferred_freq)[1:]
+        # 🟢 BUY VS 🔴 SELL PRESSURE (Anatomy of the last 14 candles)
+        # Calculates 'Bullish' vs 'Bearish' wick and body strength
+        bull_strength = (df['Close'] - df['Low']).tail(14).sum()
+        bear_strength = (df['High'] - df['Close']).tail(14).sum()
+        total_p = bull_strength + bear_strength
+        
+        buy_pct = round((bull_strength / total_p * 100), 1) if total_p > 0 else 50
+        sell_pct = 100 - buy_pct
 
-    return {
-        "df": df,
-        "buy_p": buy_pct,
-        "sell_p": sell_pct,
-        "f_dates": future_dates,
-        "f_prices": future_y,
-        "curr": df['Close'].iloc[-1]
-    }
+        # PROJECTION ENGINE (Linear Regression for next 5 bars)
+        y = df['Close'].values
+        x = np.arange(len(y))
+        slope, intercept, _, _, _ = stats.linregress(x, y)
+        
+        future_x = np.arange(len(y), len(y) + 5)
+        future_y = slope * future_x + intercept
+        
+        # Create timestamps for projection
+        last_time = df.index[-1]
+        freq_map = {"1m": "1min", "5m": "5min", "15m": "15min", "1h": "1h"}
+        f_dates = pd.date_range(last_time, periods=6, freq=freq_map.get(tf, "1D"))[1:]
+
+        return {
+            "df": df,
+            "buy_p": buy_pct,
+            "sell_p": sell_pct,
+            "f_dates": f_dates,
+            "f_prices": future_y,
+            "curr": df['Close'].iloc[-1],
+            "prev": df['Close'].iloc[-2]
+        }
+    except Exception as e:
+        return None
 
 # --- 3. UI LAYOUT ---
-st.set_page_config(layout="wide", page_title="NexusFlow AI")
-st.title("🏛️ NexusFlow: Live Institutional Terminal")
+st.set_page_config(layout="wide", page_title="NexusFlow Terminal")
+st.title("🏛️ NexusFlow Institutional Terminal")
 
 with st.sidebar:
-    st.header("🎛️ Watchlist Control")
-    # Search and Add
-    new_asset = st.text_input("Search (e.g. Gold, AAPL, BTC):")
-    if st.button("➕ Add Asset"):
+    st.header("🎛️ Watchlist")
+    
+    # ADD ASSET
+    new_asset = st.text_input("Find Ticker (e.g. Gold, AAPL, BTC):")
+    if st.button("➕ Add to Feed"):
         search = yf.Search(new_asset, max_results=1).quotes
-        if search and search[0]['symbol'] not in st.session_state['favorites']:
-            st.session_state['favorites'].append(search[0]['symbol'])
-            st.rerun()
+        if search:
+            ticker = search[0]['symbol']
+            if ticker not in st.session_state['favorites']:
+                st.session_state['favorites'].append(ticker)
+                st.rerun()
     
     st.divider()
-    global_tf = st.selectbox("Global Timeframe:", ["1m", "5m", "15m", "1h"], index=0)
+    global_tf = st.selectbox("Interval:", ["1m", "5m", "15m", "1h"], index=0)
     
-    # Delete Section
-    st.write("### Active Instruments")
+    # MANAGE LIST
+    st.write("### Active Monitors")
     for fav in st.session_state['favorites']:
         c1, c2 = st.columns([4, 1])
-        c1.write(f"🔍 {fav}")
+        c1.write(f"📊 {fav}")
         if c2.button("🗑️", key=f"del_{fav}"):
             st.session_state['favorites'].remove(fav)
             st.rerun()
 
-# --- 4. MAIN DASHBOARD ---
+# --- 4. MAIN DASHBOARD DISPLAY ---
+st.caption(f"Next Pulse Update in 30s | Current Time: {pd.Timestamp.now().strftime('%H:%M:%S')}")
+
 for asset in st.session_state['favorites']:
     data = get_market_analysis(asset, global_tf)
+    
     if data:
         with st.container(border=True):
-            # Header Row with Pressure Metrics
-            col_info, col_chart = st.columns([1, 3])
+            col_metrics, col_chart = st.columns([1, 4])
             
-            with col_info:
+            with col_metrics:
                 st.subheader(asset)
-                st.metric("Price", f"{data['curr']:.4f}")
+                change = data['curr'] - data['prev']
+                st.metric("Live Price", f"{data['curr']:.4f}", f"{change:.4f}")
                 
-                # Pressure Display
-                st.write("**Market Pressure**")
-                st.write(f"🟢 Buyers: {data['buy_p']}%")
+                # PRESSURE GAUGES
+                st.write("**Pressure Pulse**")
+                st.caption(f"🟢 Buy: {data['buy_p']}%")
                 st.progress(data['buy_p'] / 100)
-                st.write(f"🔴 Sellers: {data['sell_p']}%")
+                st.caption(f"🔴 Sell: {data['sell_p']}%")
                 st.progress(data['sell_p'] / 100)
                 
-                # Trend Decision
-                decision = "STRONG BUY" if data['buy_p'] > 60 else "STRONG SELL" if data['sell_p'] > 60 else "NEUTRAL"
-                st.info(f"AI Decision: {decision}")
+                # AI RECOMMENDATION
+                if data['buy_p'] > 60:
+                    st.success("🎯 STRONG BUY")
+                elif data['sell_p'] > 60:
+                    st.error("📉 STRONG SELL")
+                else:
+                    st.warning("⚖️ NEUTRAL")
 
             with col_chart:
-                fig = go.Figure(data=[go.Candlestick(
+                # CANDLESTICK + PROJECTION
+                fig = go.Figure()
+                
+                # Actual Market Data
+                fig.add_trace(go.Candlestick(
                     x=data['df'].index, open=data['df']['Open'],
                     high=data['df']['High'], low=data['df']['Low'],
                     close=data['df']['Close'], name="Market"
-                )])
-                
-                # Add Projection
-                fig.add_trace(go.Scatter(
-                    x=data['f_dates'], y=data['f_prices'],
-                    mode='lines+markers', line=dict(color='orange', dash='dash'),
-                    name="AI Projection"
                 ))
                 
-                fig.update_layout(height=400, template="plotly_dark", xaxis_rangeslider_visible=False, margin=dict(l=0, r=0, t=20, b=0))
+                # AI Projection Line
+                fig.add_trace(go.Scatter(
+                    x=data['f_dates'], y=data['f_prices'],
+                    mode='lines+markers', line=dict(color='orange', width=3, dash='dash'),
+                    name="AI Path"
+                ))
+                
+                fig.update_layout(
+                    height=350, template="plotly_dark", 
+                    xaxis_rangeslider_visible=False,
+                    margin=dict(l=0, r=0, t=10, b=10)
+                )
                 st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.error(f"Waiting for {asset} data... (Yahoo limit likely hit for this interval)")
