@@ -1,7 +1,5 @@
 streamlit
 yfinance
 pandas
-requests
-transformers
-torch
 plotly
+scipy
