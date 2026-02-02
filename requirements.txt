@@ -4,3 +4,5 @@ pandas
 requests
 transformers
 torch
+plotly
+seaborn
