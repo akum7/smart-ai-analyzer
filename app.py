@@ -2,74 +2,83 @@ import streamlit as st
 import pandas as pd
 import yfinance as yf
 import plotly.graph_objects as go
-from transformers import pipeline
+from scipy.signal import argrelextrema
+import numpy as np
 
-# --- 1. PRO UI SETUP ---
-st.set_page_config(page_title="NexusFlow Pro Terminal", layout="wide")
-st.title("🏛️ NexusFlow: AI Institutional Terminal")
+# --- 1. SMART ANALYSIS TOOLS ---
 
-# --- 2. PERSISTENT WATCHLIST ---
-if 'watchlist' not in st.session_state:
-    st.session_state.watchlist = ["GC=F", "EURUSD=X", "BTC-USD"]
-
-# --- 3. SIDEBAR: MONITORING & INPUT ---
-with st.sidebar:
-    st.header("🎛️ Terminal Controls")
-    new_symbol = st.text_input("Add Symbol (e.g., AAPL, GBPUSD=X):").upper()
-    if st.button("➕ Add to Monitor"):
-        if new_symbol and new_symbol not in st.session_state.watchlist:
-            st.session_state.watchlist.append(new_symbol)
+def calculate_pressure(df):
+    """Calculates Buy vs Sell Pressure Percentage"""
+    # CLV (Close Location Value) determines if bulls or bears won the candle
+    # If close is near high, bulls are strong. If near low, bears are strong.
+    clv = ((df['Close'] - df['Low']) - (df['High'] - df['Close'])) / (df['High'] - df['Low'])
+    clv = clv.fillna(0)
     
-    st.write("---")
-    selected_asset = st.selectbox("Active Monitoring:", st.session_state.watchlist)
+    # Calculate Buying and Selling Volume
+    buy_vol = df['Volume'] * (clv.clip(lower=0))
+    sell_vol = df['Volume'] * (clv.clip(upper=0).abs())
     
-    # TIMEFRAME SWITCHER
-    tf_choice = st.radio("Timeframe Analysis:", ["1m", "5m", "1h", "1d"], index=3)
+    total_buy = buy_vol.tail(20).sum()
+    total_sell = sell_vol.tail(20).sum()
+    total = total_buy + total_sell
     
-    # Clear Watchlist
-    if st.button("🗑️ Reset Watchlist"):
-        st.session_state.watchlist = ["GC=F", "EURUSD=X", "BTC-USD"]
-        st.rerun()
+    buy_pct = (total_buy / total * 100) if total > 0 else 50
+    sell_pct = (total_sell / total * 100) if total > 0 else 50
+    return round(buy_pct, 1), round(sell_pct, 1)
 
-# --- 4. DATA ENGINE ---
-def get_data(ticker, interval):
-    # Mapping intervals to periods
-    period_map = {"1m": "1d", "5m": "5d", "1h": "1mo", "1d": "max"}
-    df = yf.download(ticker, period=period_map[interval], interval=interval, progress=False)
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-    return df
+def get_levels(df):
+    """Detects major Support and Resistance using local Min/Max"""
+    # We look for price points where the trend reversed
+    n = 5 # neighborhood to look for peaks
+    df['min'] = df.iloc[argrelextrema(df.Close.values, np.less_equal, order=n)[0]]['Close']
+    df['max'] = df.iloc[argrelextrema(df.Close.values, np.greater_equal, order=n)[0]]['Close']
+    
+    supports = df['min'].dropna().unique().tolist()
+    resistances = df['max'].dropna().unique().tolist()
+    return supports[-3:], resistances[-3:] # Return the last 3 major zones
 
-data = get_data(selected_asset, tf_choice)
+# --- 2. DASHBOARD UI ---
+st.set_page_config(layout="wide")
+st.title("🏛️ NexusFlow: Smart Pressure Terminal")
 
-# --- 5. SIGNAL LOGIC & DASHBOARD ---
-col1, col2 = st.columns([3, 1])
+ticker = st.sidebar.text_input("Symbol:", "GC=F")
+data = yf.download(ticker, period="6d", interval="1h", progress=False)
+if isinstance(data.columns, pd.MultiIndex): data.columns = data.columns.get_level_values(0)
+
+# --- 3. THE "REAL-TIME" PRESSURE GAUGE ---
+buy_p, sell_p = calculate_pressure(data)
+
+col1, col2, col3 = st.columns([1, 2, 1])
 
 with col1:
-    # PROFESSIONAL CANDLESTICK CHART
+    st.write("### Buy vs Sell Power")
+    st.metric("Bulls (Buy %)", f"{buy_p}%", delta_color="normal")
+    st.metric("Bears (Sell %)", f"-{sell_p}%", delta_color="inverse")
+    
+    # Progress Bar UI
+    st.write("Market Balance")
+    st.progress(buy_p / 100)
+
+with col2:
+    # MAIN CHART WITH S/R LEVELS
+    supports, resistances = get_levels(data)
+    
     fig = go.Figure(data=[go.Candlestick(x=data.index,
                     open=data['Open'], high=data['High'],
                     low=data['Low'], close=data['Close'], name="Price")])
-    fig.update_layout(template="plotly_dark", xaxis_rangeslider_visible=False, height=500)
+    
+    # Add Support Lines (Green)
+    for s in supports:
+        fig.add_hline(y=s, line_dash="dash", line_color="green", annotation_text="SUPPORT")
+        
+    # Add Resistance Lines (Red)
+    for r in resistances:
+        fig.add_hline(y=r, line_dash="dash", line_color="red", annotation_text="RESISTANCE")
+
+    fig.update_layout(template="plotly_dark", height=600, xaxis_rangeslider_visible=False)
     st.plotly_chart(fig, use_container_width=True)
 
-with col2:
-    # CHANGE % & PRICE
-    curr_price = data['Close'].iloc[-1]
-    prev_price = data['Close'].iloc[-2]
-    chg_pct = ((curr_price - prev_price) / prev_price) * 100
-    
-    st.metric(label="Live Price", value=f"{curr_price:.4f}", delta=f"{chg_pct:.2f}%")
-    
-    # SMART SIGNALS (Buy/Sell/Wait)
-    st.subheader("💡 AI Signal")
-    # Simple logic: If price > 20-period MA and Vol is high -> Buy
-    ma20 = data['Close'].rolling(20).mean().iloc[-1]
-    if curr_price > ma20:
-        st.success("🎯 SIGNAL: BUY")
-        st.caption("Institutional accumulation detected above MA20.")
-    elif curr_price < ma20:
-        st.error("🎯 SIGNAL: SELL")
-        st.caption("Distribution active below key resistance.")
-    else:
-        st.warning("🎯 SIGNAL: WAIT")
+with col3:
+    st.write("### Key Zones")
+    st.error(f"Resistance: {max(resistances):.2f}" if resistances else "No Resistance Found")
+    st.success(f"Support: {min(supports):.2f}" if supports else "No Support Found")
